@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 class CallbackService:
     """Service for sending callbacks to Backend API"""
 
-    def __init__(self, timeout: int = 30):
+    def __init__(self, timeout: int = 30, retry_count: int = 3):
         """Initialize callback service"""
         self.timeout = timeout
+        self.retry_count = retry_count
         self.session = None
 
     async def __aenter__(self):
@@ -35,7 +36,7 @@ class CallbackService:
         self,
         callback_url: str,
         data: Dict[str, Any],
-        retry_count: int = 3
+        retry_count: int = None
     ) -> bool:
         """Send callback to Backend with retry logic"""
 
@@ -48,7 +49,8 @@ class CallbackService:
                 timeout=aiohttp.ClientTimeout(total=self.timeout)
             )
 
-        for attempt in range(retry_count):
+        retry_attempts = retry_count or self.retry_count
+        for attempt in range(retry_attempts):
             try:
                 logger.debug(f"Sending callback to {callback_url}, attempt {attempt + 1}")
 
@@ -79,10 +81,10 @@ class CallbackService:
                 logger.error(f"Unexpected callback error: {e}")
 
             # Wait before retry
-            if attempt < retry_count - 1:
+            if attempt < retry_attempts - 1:
                 await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-        logger.error(f"Failed to send callback after {retry_count} attempts")
+        logger.error(f"Failed to send callback after {retry_attempts} attempts")
         return False
 
     async def send_progress(
@@ -134,7 +136,8 @@ class CallbackService:
         callback_url: str,
         job_id: str,
         error_message: str,
-        error_code: str = "RENDER_ERROR"
+        error_code: str = "RENDER_ERROR",
+        details: Dict[str, Any] = None
     ) -> bool:
         """Send error callback"""
 
@@ -144,6 +147,9 @@ class CallbackService:
             "error_message": error_message,
             "error_code": error_code
         }
+
+        if details:
+            data["details"] = details
 
         return await self.send_callback(callback_url, data)
 

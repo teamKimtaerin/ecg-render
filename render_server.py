@@ -26,6 +26,18 @@ from modules.queue import RenderQueue, RenderJob
 from modules.worker import RenderWorker
 from src.logger import get_logger
 
+# Error code constants
+class ErrorCodes:
+    GPU_MEMORY_INSUFFICIENT = "GPU_MEMORY_INSUFFICIENT"
+    INVALID_VIDEO_FORMAT = "INVALID_VIDEO_FORMAT"
+    SCENARIO_PARSE_ERROR = "SCENARIO_PARSE_ERROR"
+    RENDERING_TIMEOUT = "RENDERING_TIMEOUT"
+    STORAGE_ACCESS_ERROR = "STORAGE_ACCESS_ERROR"
+    CONNECTION_ERROR = "CONNECTION_ERROR"
+    TIMEOUT_ERROR = "TIMEOUT_ERROR"
+    RENDER_ERROR = "RENDER_ERROR"
+    CANCELLED = "CANCELLED"
+
 # FastAPI 앱 생성
 app = FastAPI(
     title="GPU Render Server",
@@ -39,6 +51,9 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 BACKEND_CALLBACK_URL = os.getenv("BACKEND_CALLBACK_URL", "")
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
 TEMP_DIR = os.getenv("TEMP_DIR", "/tmp/render")
+CALLBACK_RETRY_COUNT = int(os.getenv("CALLBACK_RETRY_COUNT", "3"))
+CALLBACK_TIMEOUT = int(os.getenv("CALLBACK_TIMEOUT", "30"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # 로거 설정
 logger = get_logger(__name__)
@@ -53,8 +68,8 @@ worker_tasks: list[asyncio.Task] = []
 
 class RenderRequest(BaseModel):
     """렌더링 요청 모델"""
-    job_id: str
-    video_url: str
+    jobId: str
+    videoUrl: str
     scenario: Dict[str, Any]  # MotionText 시나리오
     options: Dict[str, Any] = {
         "width": 1920,
@@ -63,7 +78,7 @@ class RenderRequest(BaseModel):
         "quality": 90,
         "format": "mp4"
     }
-    callback_url: str
+    callbackUrl: str
 
 
 class RenderResponse(BaseModel):
@@ -71,6 +86,7 @@ class RenderResponse(BaseModel):
     status: str
     job_id: str
     message: str
+    estimated_time: Optional[int] = None
 
 
 class JobStatus(BaseModel):
@@ -81,6 +97,8 @@ class JobStatus(BaseModel):
     message: Optional[str] = None
     download_url: Optional[str] = None
     error_message: Optional[str] = None
+    error_code: Optional[str] = None
+    estimated_time_remaining: Optional[int] = None
 
 
 # ========== Startup/Shutdown Events ==========
@@ -183,30 +201,31 @@ def check_gpu_status():
 
 # ========== API Endpoints ==========
 
-@app.post("/api/render/process", response_model=RenderResponse)
+@app.post("/render", response_model=RenderResponse)
 async def process_render_job(request: RenderRequest):
     """렌더링 작업 수신 및 큐에 추가"""
     try:
-        logger.info(f"렌더링 요청 수신 - job_id: {request.job_id}")
+        logger.info(f"렌더링 요청 수신 - job_id: {request.jobId}")
 
         # RenderJob 생성
         job = RenderJob(
-            job_id=request.job_id,
-            video_url=request.video_url,
+            job_id=request.jobId,
+            video_url=request.videoUrl,
             scenario=request.scenario,
             options=request.options,
-            callback_url=request.callback_url
+            callback_url=request.callbackUrl
         )
 
         # 큐에 추가
         await render_queue.add_job(job)
 
-        logger.info(f"작업이 큐에 추가됨 - job_id: {request.job_id}")
+        logger.info(f"작업이 큐에 추가됨 - job_id: {request.jobId}")
 
         return RenderResponse(
             status="accepted",
-            job_id=request.job_id,
-            message="Job queued for processing"
+            job_id=request.jobId,
+            message="Job queued for processing",
+            estimated_time=180  # 기본 예상 시간 3분
         )
 
     except Exception as e:
@@ -290,6 +309,9 @@ async def health_check():
 
         return {
             "status": "healthy",
+            "gpu_count": len(gpu_info) if gpu_info else 0,
+            "available_memory": f"{sum([24 - info.get('reserved_gb', 0) for info in gpu_info.values()])}GB" if gpu_info else "Unknown",
+            "queue_length": queue_status.get('pending', 0) if queue_status else 0,
             "timestamp": datetime.now().isoformat(),
             "queue": queue_status,
             "gpu": gpu_info,
@@ -305,12 +327,22 @@ async def health_check():
         }
 
 
-@app.get("/api/render/queue/status")
+@app.get("/queue/status")
 async def get_queue_status():
     """큐 상태 조회"""
     try:
         status = render_queue.get_queue_status()
-        return status
+        # 예상 대기 시간 계산 (관예상 작업별 3분)
+        pending_jobs = status.get('pending', 0)
+        processing_jobs = status.get('processing', 0)
+        estimated_wait_time = pending_jobs * 180  # 3분 per job
+
+        return {
+            "pending_jobs": pending_jobs,
+            "processing_jobs": processing_jobs,
+            "estimated_wait_time": estimated_wait_time,
+            "detailed_status": status
+        }
 
     except Exception as e:
         logger.error(f"큐 상태 조회 실패: {e}")
