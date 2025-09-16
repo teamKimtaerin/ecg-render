@@ -93,9 +93,15 @@ class CallbackService:
         job_id: str,
         progress: int,
         message: str = "",
-        estimated_time_remaining: int = None
+        estimated_time_remaining: int = None,
+        # Phase 2 metrics (optional for backward compatibility)
+        frames_processed: int = None,
+        frames_dropped: int = None,
+        drop_rate: float = None,
+        memory_peak_mb: float = None,
+        memory_trend: str = None
     ) -> bool:
-        """Send progress update callback"""
+        """Send progress update callback with optional Phase 2 metrics"""
 
         data = {
             "job_id": job_id,
@@ -107,6 +113,51 @@ class CallbackService:
         if estimated_time_remaining is not None:
             data["estimated_time_remaining"] = estimated_time_remaining
 
+        # Add Phase 2 metrics if provided
+        if frames_processed is not None:
+            data["frames_processed"] = frames_processed
+        if frames_dropped is not None:
+            data["frames_dropped"] = frames_dropped
+        if drop_rate is not None:
+            data["drop_rate"] = drop_rate
+        if memory_peak_mb is not None:
+            data["memory_peak_mb"] = memory_peak_mb
+        if memory_trend is not None:
+            data["memory_trend"] = memory_trend
+
+        return await self.send_callback(callback_url, data)
+
+    async def send_streaming_progress(
+        self,
+        callback_url: str,
+        job_id: str,
+        progress: int,
+        frames_processed: int,
+        frames_dropped: int = 0,
+        drop_rate: float = 0.0,
+        memory_usage_mb: float = 0.0,
+        queue_size: int = 0,
+        message: str = ""
+    ) -> bool:
+        """Send Phase 2 streaming progress update"""
+
+        # Calculate efficiency
+        total_frames = frames_processed + frames_dropped
+        efficiency = (frames_processed / total_frames * 100) if total_frames > 0 else 100.0
+
+        data = {
+            "job_id": job_id,
+            "status": "processing",
+            "progress": progress,
+            "message": message,
+            "frames_processed": frames_processed,
+            "frames_dropped": frames_dropped,
+            "drop_rate": drop_rate,
+            "memory_usage_mb": memory_usage_mb,
+            "queue_size": queue_size,
+            "efficiency": efficiency
+        }
+
         return await self.send_callback(callback_url, data)
 
     async def send_completion(
@@ -115,9 +166,15 @@ class CallbackService:
         job_id: str,
         download_url: str,
         file_size: int,
-        duration: float
+        duration: float,
+        # Phase 2 final metrics (optional)
+        total_frames_processed: int = None,
+        total_frames_dropped: int = None,
+        final_drop_rate: float = None,
+        peak_memory_mb: float = None,
+        average_fps: float = None
     ) -> bool:
-        """Send completion callback"""
+        """Send completion callback with optional Phase 2 final metrics"""
 
         data = {
             "job_id": job_id,
@@ -128,6 +185,18 @@ class CallbackService:
             "duration": duration,
             "message": "Rendering completed successfully"
         }
+
+        # Add Phase 2 final metrics if provided
+        if total_frames_processed is not None:
+            data["total_frames_processed"] = total_frames_processed
+        if total_frames_dropped is not None:
+            data["total_frames_dropped"] = total_frames_dropped
+        if final_drop_rate is not None:
+            data["final_drop_rate"] = final_drop_rate
+        if peak_memory_mb is not None:
+            data["peak_memory_mb"] = peak_memory_mb
+        if average_fps is not None:
+            data["average_fps"] = average_fps
 
         return await self.send_callback(callback_url, data)
 

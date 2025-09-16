@@ -24,6 +24,7 @@ import uvicorn
 
 from modules.queue import RenderQueue, RenderJob
 from modules.worker import RenderWorker
+from modules.parallel_worker import ParallelRenderWorker
 from src.logger import get_logger
 
 # Error code constants
@@ -54,6 +55,13 @@ TEMP_DIR = os.getenv("TEMP_DIR", "/tmp/render")
 CALLBACK_RETRY_COUNT = int(os.getenv("CALLBACK_RETRY_COUNT", "3"))
 CALLBACK_TIMEOUT = int(os.getenv("CALLBACK_TIMEOUT", "30"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Parallel rendering configuration
+USE_PARALLEL_RENDERING = os.getenv("USE_PARALLEL_RENDERING", "true").lower() == "true"
+BROWSER_POOL_SIZE = int(os.getenv("BROWSER_POOL_SIZE", "4"))
+
+# Render mode configuration (celery or standalone)
+RENDER_MODE = os.getenv("RENDER_MODE", "standalone")  # "celery" or "standalone"
 
 # 로거 설정
 logger = get_logger(__name__)
@@ -120,20 +128,45 @@ async def startup_event():
     }
 
     # 워커 생성 및 시작
-    for i in range(MAX_CONCURRENT_JOBS):
-        worker = RenderWorker(render_queue, worker_config)
-        render_workers.append(worker)
+    if USE_PARALLEL_RENDERING:
+        # Use parallel workers for better performance
+        logger.info(f"🚀 Using PARALLEL rendering with {BROWSER_POOL_SIZE} browser instances per worker")
 
-        # 비동기 태스크로 워커 시작
-        task = asyncio.create_task(worker.start())
-        worker_tasks.append(task)
+        for i in range(MAX_CONCURRENT_JOBS):
+            worker = ParallelRenderWorker(
+                render_queue,
+                worker_config,
+                pool_size=BROWSER_POOL_SIZE
+            )
+            render_workers.append(worker)
 
-        logger.info(f"렌더링 워커 {i+1} 시작됨")
+            # 비동기 태스크로 워커 시작
+            task = asyncio.create_task(worker.start())
+            worker_tasks.append(task)
+
+            logger.info(f"병렬 렌더링 워커 {i+1} 시작됨 (pool size: {BROWSER_POOL_SIZE})")
+    else:
+        # Use legacy sequential workers
+        logger.info("Using legacy sequential rendering")
+
+        for i in range(MAX_CONCURRENT_JOBS):
+            worker = RenderWorker(render_queue, worker_config)
+            render_workers.append(worker)
+
+            # 비동기 태스크로 워커 시작
+            task = asyncio.create_task(worker.start())
+            worker_tasks.append(task)
+
+            logger.info(f"렌더링 워커 {i+1} 시작됨")
 
     # GPU 상태 확인
     check_gpu_status()
 
-    logger.info(f"✅ GPU 렌더링 서버 준비 완료 (워커: {MAX_CONCURRENT_JOBS}개)")
+    if USE_PARALLEL_RENDERING:
+        total_browsers = MAX_CONCURRENT_JOBS * BROWSER_POOL_SIZE
+        logger.info(f"✅ GPU 렌더링 서버 준비 완료 (워커: {MAX_CONCURRENT_JOBS}개, 총 브라우저: {total_browsers}개)")
+    else:
+        logger.info(f"✅ GPU 렌더링 서버 준비 완료 (워커: {MAX_CONCURRENT_JOBS}개)")
 
 
 @app.on_event("shutdown")
@@ -315,7 +348,9 @@ async def health_check():
             "timestamp": datetime.now().isoformat(),
             "queue": queue_status,
             "gpu": gpu_info,
-            "workers": len(render_workers)
+            "workers": len(render_workers),
+            "parallel_rendering": USE_PARALLEL_RENDERING,
+            "browser_pool_size": BROWSER_POOL_SIZE if USE_PARALLEL_RENDERING else 0
         }
 
     except Exception as e:
@@ -388,8 +423,17 @@ if __name__ == "__main__":
         "--log-level", default="info",
         choices=["debug", "info", "warning", "error"]
     )
+    parser.add_argument(
+        "--mode", default=RENDER_MODE,
+        choices=["standalone", "celery"],
+        help="실행 모드: standalone (독립 서버) 또는 celery (워커)"
+    )
 
     args = parser.parse_args()
+
+    # Override render mode if specified
+    if args.mode:
+        RENDER_MODE = args.mode
 
     # 로깅 설정
     logging.basicConfig(
@@ -398,20 +442,49 @@ if __name__ == "__main__":
     )
 
     logger.info("🚀 GPU 렌더링 서버 시작")
+    logger.info(f"   실행 모드: {RENDER_MODE}")
     logger.info(f"   호스트: {args.host}:{args.port}")
-    logger.info(f"   유비콘 워커: {args.workers}")
-    logger.info(f"   렌더링 워커: {MAX_CONCURRENT_JOBS}")
     logger.info(f"   Redis: {REDIS_URL}")
     logger.info(f"   S3 버킷: {S3_BUCKET}")
-    logger.info(f"   콜백 URL: {BACKEND_CALLBACK_URL if BACKEND_CALLBACK_URL else 'Not configured'}")
 
-    # FastAPI 서버 실행
-    uvicorn.run(
-        "render_server:app",
-        host=args.host,
-        port=args.port,
-        workers=args.workers,
-        access_log=True,
-        log_level=args.log_level,
-        reload=False
-    )
+    if RENDER_MODE == "celery":
+        # Celery worker mode
+        logger.info("🔧 Celery Worker 모드로 실행")
+        logger.info("   Celery worker를 시작하려면 다음 명령어를 사용하세요:")
+        logger.info("   python celery_worker.py")
+        logger.info("")
+        logger.info("   또는 Docker Compose로 실행:")
+        logger.info("   docker-compose -f docker-compose.celery.yml up -d")
+
+        # Import and run celery worker
+        import subprocess
+        import sys
+
+        celery_cmd = [
+            sys.executable,
+            "celery_worker.py"
+        ]
+
+        logger.info(f"Celery worker 시작 중...")
+        subprocess.run(celery_cmd)
+
+    else:
+        # Standalone server mode
+        logger.info("🖥️ Standalone 서버 모드로 실행")
+        logger.info(f"   유비콘 워커: {args.workers}")
+        logger.info(f"   렌더링 워커: {MAX_CONCURRENT_JOBS}")
+        logger.info(f"   콜백 URL: {BACKEND_CALLBACK_URL if BACKEND_CALLBACK_URL else 'Not configured'}")
+        logger.info(f"   병렬 렌더링: {'활성화' if USE_PARALLEL_RENDERING else '비활성화'}")
+        if USE_PARALLEL_RENDERING:
+            logger.info(f"   브라우저 풀 크기: {BROWSER_POOL_SIZE}개/워커")
+
+        # FastAPI 서버 실행
+        uvicorn.run(
+            "render_server:app",
+            host=args.host,
+            port=args.port,
+            workers=args.workers,
+            access_log=True,
+            log_level=args.log_level,
+            reload=False
+        )

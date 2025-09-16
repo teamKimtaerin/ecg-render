@@ -1,0 +1,210 @@
+version: '3.8'
+
+services:
+  # Redis server (shared with API server)
+  redis:
+    image: redis:7-alpine
+    container_name: ecg-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ecg-network
+
+  # GPU Render Worker 1
+  gpu-worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.celery
+    container_name: ecg-gpu-worker-1
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - REDIS_URL=redis://redis:6379/0
+      - RENDER_PAGE_URL=http://frontend:3001/editor
+      - S3_BUCKET=${S3_BUCKET:-ecg-rendered-videos}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-2}
+      - ENABLE_GPU_ENCODING=true
+      - WORKER_NAME=gpu-worker-1
+      - WORKER_ID=0
+      - TEMP_DIR=/tmp/render
+      - LOG_LEVEL=INFO
+    command: python celery_worker.py
+    volumes:
+      - ./:/app
+      - /tmp/render:/tmp/render
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 2G
+          cpus: '2'
+    networks:
+      - ecg-network
+    restart: unless-stopped
+
+  # GPU Render Worker 2
+  gpu-worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.celery
+    container_name: ecg-gpu-worker-2
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - REDIS_URL=redis://redis:6379/0
+      - RENDER_PAGE_URL=http://frontend:3001/editor
+      - S3_BUCKET=${S3_BUCKET:-ecg-rendered-videos}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-2}
+      - ENABLE_GPU_ENCODING=true
+      - WORKER_NAME=gpu-worker-2
+      - WORKER_ID=1
+      - TEMP_DIR=/tmp/render
+      - LOG_LEVEL=INFO
+    command: python celery_worker.py
+    volumes:
+      - ./:/app
+      - /tmp/render:/tmp/render
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 2G
+          cpus: '2'
+    networks:
+      - ecg-network
+    restart: unless-stopped
+
+  # GPU Render Worker 3
+  gpu-worker-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.celery
+    container_name: ecg-gpu-worker-3
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - REDIS_URL=redis://redis:6379/0
+      - RENDER_PAGE_URL=http://frontend:3001/editor
+      - S3_BUCKET=${S3_BUCKET:-ecg-rendered-videos}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-2}
+      - ENABLE_GPU_ENCODING=true
+      - WORKER_NAME=gpu-worker-3
+      - WORKER_ID=2
+      - TEMP_DIR=/tmp/render
+      - LOG_LEVEL=INFO
+    command: python celery_worker.py
+    volumes:
+      - ./:/app
+      - /tmp/render:/tmp/render
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 2G
+          cpus: '2'
+    networks:
+      - ecg-network
+    restart: unless-stopped
+
+  # GPU Render Worker 4
+  gpu-worker-4:
+    build:
+      context: .
+      dockerfile: Dockerfile.celery
+    container_name: ecg-gpu-worker-4
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - REDIS_URL=redis://redis:6379/0
+      - RENDER_PAGE_URL=http://frontend:3001/editor
+      - S3_BUCKET=${S3_BUCKET:-ecg-rendered-videos}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-2}
+      - ENABLE_GPU_ENCODING=true
+      - WORKER_NAME=gpu-worker-4
+      - WORKER_ID=3
+      - TEMP_DIR=/tmp/render
+      - LOG_LEVEL=INFO
+    command: python celery_worker.py
+    volumes:
+      - ./:/app
+      - /tmp/render:/tmp/render
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 2G
+          cpus: '2'
+    networks:
+      - ecg-network
+    restart: unless-stopped
+
+  # Flower for monitoring (optional)
+  flower:
+    image: mher/flower:2.0
+    container_name: ecg-flower
+    command: celery --broker=redis://redis:6379/0 flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - FLOWER_BASIC_AUTH=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
+    depends_on:
+      - redis
+    networks:
+      - ecg-network
+    profiles:
+      - monitoring
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  ecg-network:
+    external: true
+    name: ecg-network
