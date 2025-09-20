@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MotionText Overlay Renderer</title>
+
+    <!-- GSAP for animations -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: transparent; /* 투명 배경 중요! */
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+            font-family: 'Noto Sans KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        /* 비디오는 숨김 (오버레이만 렌더링) */
+        video {
+            display: none;
+        }
+
+        /* 자막 컨테이너 */
+        #caption-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        /* 폰트 프리로드 */
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap');
+    </style>
+</head>
+<body>
+    <!-- 자막 렌더링 컨테이너 -->
+    <div id="caption-container"></div>
+
+    <script type="module">
+        import { MotionTextRenderer } from '/node_modules/motiontext-renderer/dist/index.js';
+
+        let renderer = null;
+        let currentScenario = null;
+
+        // 전역 함수로 노출 (Puppeteer에서 호출)
+        window.loadMotionTextScenario = async function(scenario) {
+            try {
+                console.log('📜 Loading MotionText scenario...');
+
+                // 기존 렌더러 정리
+                if (renderer) {
+                    renderer.dispose();
+                    renderer = null;
+                }
+
+                // 컨테이너 초기화
+                const container = document.getElementById('caption-container');
+                container.innerHTML = '';
+
+                // 새 렌더러 생성
+                renderer = new MotionTextRenderer(container, {
+                    debugMode: false,
+                    fps: scenario.timebase?.fps || 30,
+                    snapToFrame: true,
+                    preloadMs: 300
+                });
+
+                // 시나리오 로드
+                await renderer.loadConfig(scenario);
+                currentScenario = scenario;
+
+                console.log('✅ MotionText scenario loaded successfully');
+                return {
+                    success: true,
+                    message: 'Scenario loaded',
+                    cueCount: scenario.cues?.length || 0
+                };
+
+            } catch (error) {
+                console.error('❌ Failed to load scenario:', error);
+                return {
+                    success: false,
+                    error: error.message
+                };
+            }
+        };
+
+        // 특정 시간으로 이동
+        window.seekToTime = function(timeSeconds) {
+            try {
+                if (!renderer) {
+                    throw new Error('Renderer not initialized');
+                }
+
+                // MotionText 렌더러 시간 업데이트
+                renderer.seek(timeSeconds);
+
+                // 렌더링 완료 대기
+                return new Promise(resolve => {
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            resolve({
+                                success: true,
+                                currentTime: timeSeconds
+                            });
+                        });
+                    });
+                });
+
+            } catch (error) {
+                console.error('❌ Seek failed:', error);
+                return {
+                    success: false,
+                    error: error.message
+                };
+            }
+        };
+
+        // 현재 상태 반환
+        window.getRendererStatus = function() {
+            return {
+                initialized: renderer !== null,
+                hasScenario: currentScenario !== null,
+                scenarioInfo: currentScenario ? {
+                    version: currentScenario.version,
+                    fps: currentScenario.timebase?.fps,
+                    cueCount: currentScenario.cues?.length
+                } : null
+            };
+        };
+
+        // 렌더러 정리
+        window.cleanup = function() {
+            if (renderer) {
+                renderer.dispose();
+                renderer = null;
+            }
+            currentScenario = null;
+            document.getElementById('caption-container').innerHTML = '';
+            console.log('🧹 Cleanup completed');
+        };
+
+        // 페이지 로드 완료 신호
+        window.addEventListener('DOMContentLoaded', () => {
+            console.log('🎬 Overlay renderer page ready');
+            window.pageReady = true;
+        });
+
+        // 에러 핸들링
+        window.addEventListener('error', (event) => {
+            console.error('🚨 Runtime error:', event.error);
+        });
+
+        window.addEventListener('unhandledrejection', (event) => {
+            console.error('🚨 Unhandled promise rejection:', event.reason);
+        });
+    </script>
+</body>
+</html>
