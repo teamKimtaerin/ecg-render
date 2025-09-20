@@ -17,17 +17,16 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy requirements
-COPY requirements-render.txt ./
+COPY requirements.txt ./
 
 # Install Python packages
-RUN pip3 install --no-cache-dir -r requirements-render.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Install Playwright browsers
 RUN pip3 install playwright && playwright install chromium
 
 # Copy application code
-COPY services/render /app/services/render
-COPY shared /app/shared
+COPY . /app/
 
 # Set Python path
 ENV PYTHONPATH=/app
@@ -38,11 +37,18 @@ ENV DISPLAY=:99
 RUN echo '#!/bin/bash\n\
 Xvfb :99 -screen 0 1920x1080x24 &\n\
 nvidia-smi\n\
-python3 services/render/server.py --host 0.0.0.0 --port 8090' > /start.sh \
+python3 main.py --mode standalone --host 0.0.0.0 --port 8090' > /start.sh \
 && chmod +x /start.sh
+
+# Create worker script
+RUN echo '#!/bin/bash\n\
+Xvfb :99 -screen 0 1920x1080x24 &\n\
+nvidia-smi\n\
+python3 main.py --mode worker' > /start-worker.sh \
+&& chmod +x /start-worker.sh
 
 # Expose port
 EXPOSE 8090
 
-# Run server
+# Default to standalone mode (can be overridden)
 CMD ["/start.sh"]

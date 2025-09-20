@@ -23,21 +23,8 @@ from pydantic import BaseModel
 import uvicorn
 
 from modules.queue import RenderQueue, RenderJob
-from modules.worker import RenderWorker
 from modules.parallel_worker import ParallelRenderWorker
-from src.logger import get_logger
-
-# Error code constants
-class ErrorCodes:
-    GPU_MEMORY_INSUFFICIENT = "GPU_MEMORY_INSUFFICIENT"
-    INVALID_VIDEO_FORMAT = "INVALID_VIDEO_FORMAT"
-    SCENARIO_PARSE_ERROR = "SCENARIO_PARSE_ERROR"
-    RENDERING_TIMEOUT = "RENDERING_TIMEOUT"
-    STORAGE_ACCESS_ERROR = "STORAGE_ACCESS_ERROR"
-    CONNECTION_ERROR = "CONNECTION_ERROR"
-    TIMEOUT_ERROR = "TIMEOUT_ERROR"
-    RENDER_ERROR = "RENDER_ERROR"
-    CANCELLED = "CANCELLED"
+from modules.errors import ErrorCodes, ErrorFactory, RenderException
 
 # FastAPI 앱 생성
 app = FastAPI(
@@ -64,11 +51,11 @@ BROWSER_POOL_SIZE = int(os.getenv("BROWSER_POOL_SIZE", "4"))
 RENDER_MODE = os.getenv("RENDER_MODE", "standalone")  # "celery" or "standalone"
 
 # 로거 설정
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # 전역 객체
 render_queue: Optional[RenderQueue] = None
-render_workers: list[RenderWorker] = []
+render_workers: list[ParallelRenderWorker] = []
 worker_tasks: list[asyncio.Task] = []
 
 
@@ -150,7 +137,11 @@ async def startup_event():
         logger.info("Using legacy sequential rendering")
 
         for i in range(MAX_CONCURRENT_JOBS):
-            worker = RenderWorker(render_queue, worker_config)
+            worker = ParallelRenderWorker(
+                render_queue,
+                worker_config,
+                pool_size=1  # Legacy mode with single browser
+            )
             render_workers.append(worker)
 
             # 비동기 태스크로 워커 시작

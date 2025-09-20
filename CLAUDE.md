@@ -17,9 +17,8 @@ The ECG Render system consists of three main servers:
 
 ### Core Components
 
-- `render_server.py` - Main FastAPI server with endpoints for job submission and status
-- `server.py` - Alternative server entry point with different import paths
-- `celery_worker.py` - Celery worker for distributed task processing
+- `render_server.py` - Main FastAPI server with endpoints for job submission and status (legacy mode)
+- `celery_worker.py` - Celery worker for distributed task processing with Phase 2 optimizations
 - `render_engine.py` - GPU render engine with Phase 2 streaming pipeline integration
 - `modules/` - Core rendering functionality:
   - `queue.py` - Redis-based job queue system with RenderJob dataclass
@@ -88,11 +87,14 @@ The ECG Render system consists of three main servers:
 pip install -r requirements.txt
 playwright install chromium
 
-# Run main server
+# Run main server (legacy mode)
 python render_server.py --host 0.0.0.0 --port 8090
 
-# Alternative server entry point
-python server.py --host 0.0.0.0 --port 8090
+# Run Celery worker (Phase 2 optimized)
+python celery_worker.py
+
+# Or run Celery worker with custom options
+celery -A celery_worker worker --loglevel=info --queues=render_queue --concurrency=1
 ```
 
 ### Docker Development
@@ -173,6 +175,11 @@ Required for operation:
 - `CALLBACK_TIMEOUT` - Callback timeout seconds (default: 30)
 - `LOG_LEVEL` - Logging level (default: INFO)
 - `TEMP_DIR` - Temporary processing directory (default: /tmp/render)
+
+### Celery Configuration (Phase 2)
+- `CELERY_BROKER_URL` - Celery broker URL (default: redis://localhost:6379/0)
+- `CELERY_RESULT_BACKEND` - Celery result backend (default: redis://localhost:6379/1)
+- `ENABLE_MEMORY_OPTIMIZER` - Enable automatic memory optimization (default: true)
 
 ## GPU Requirements
 
@@ -302,7 +309,7 @@ Error responses include optional `details` object with additional context and su
 - Comprehensive logging with configurable levels
 - Integration monitoring across all three servers (Backend, ML Audio, GPU Render)
 - Performance metrics: 20-40× rendering speed improvement over CPU
-- Real-time progress updates via WebSocket to frontend
+- Real-time progress updates via HTTP callbacks to backend
 
 ## Phase 2: Streaming Pipeline Optimization
 
@@ -336,6 +343,10 @@ python celery_worker.py
 
 # Or in Docker
 docker-compose -f docker-compose.celery.yml up
+
+# Check Celery worker status
+celery -A celery_worker inspect active
+celery -A celery_worker inspect stats
 ```
 
 ### Monitoring Phase 2 Metrics
@@ -346,8 +357,12 @@ curl http://localhost:8090/health | jq '.streaming'
 # Monitor memory usage
 curl http://localhost:8090/health | jq '.memory'
 
-# Test Phase 2 components
-python test_phase2_streaming.py
+# Monitor Celery workers
+celery -A celery_worker inspect active
+celery -A celery_worker flower  # Web UI monitoring (if flower installed)
+
+# Redis queue monitoring
+redis-cli monitor
 ```
 
 ## Common Issues
