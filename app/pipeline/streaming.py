@@ -12,7 +12,8 @@ from typing import Optional, Dict, Any, AsyncGenerator
 from pathlib import Path
 from dataclasses import dataclass
 from collections import deque
-import subprocess
+
+from .ffmpeg import FFmpegService
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,7 @@ class StreamingPipeline:
         self.width = width
         self.height = height
         self.fps = fps
-        self.process: Optional[asyncio.subprocess.Process] = None
+        self.ffmpeg_service = FFmpegService()
         self.frame_queue = AsyncFrameQueue()
         self.is_running = False
         self.writer_task: Optional[asyncio.Task] = None
@@ -173,15 +174,12 @@ class StreamingPipeline:
         Args:
             use_gpu: Enable GPU encoding if available
         """
-        # Build FFmpeg command
-        cmd = self._build_ffmpeg_command(use_gpu)
-
-        # Start FFmpeg process
-        self.process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        # Use consolidated FFmpeg service for streaming
+        await self.ffmpeg_service.start_streaming(
+            output_path=self.output_path,
+            width=self.width,
+            height=self.height,
+            fps=self.fps
         )
 
         self.is_running = True
@@ -191,69 +189,11 @@ class StreamingPipeline:
 
         logger.info(f"Streaming pipeline started: {self.output_path}")
 
-    def _build_ffmpeg_command(self, use_gpu: bool) -> list:
-        """Build FFmpeg command with optimal settings"""
-        cmd = [
-            'ffmpeg',
-            '-y',  # Overwrite output
-            '-f', 'image2pipe',  # Image pipe input
-            '-vcodec', 'png',  # PNG decoder
-            '-framerate', str(self.fps),
-            '-i', '-',  # Read from stdin
-        ]
-
-        if use_gpu and self._check_gpu_available():
-            # NVIDIA GPU encoding
-            cmd.extend([
-                '-c:v', 'h264_nvenc',
-                '-preset', 'p4',  # Balanced quality/speed
-                '-rc', 'vbr',
-                '-cq', '23',
-                '-b:v', '0',
-                '-maxrate', '5M',
-                '-bufsize', '10M',
-                '-gpu', '0',  # Use first GPU
-            ])
-            logger.info("Using GPU encoding (h264_nvenc)")
-        else:
-            # CPU encoding with optimization
-            cmd.extend([
-                '-c:v', 'libx264',
-                '-preset', 'faster',
-                '-crf', '23',
-                '-tune', 'zerolatency',
-                '-x264-params', 'keyint=60:min-keyint=30:scenecut=0',
-            ])
-            logger.info("Using CPU encoding (libx264)")
-
-        # Output settings
-        cmd.extend([
-            '-pix_fmt', 'yuv420p',
-            '-vf', f'scale={self.width}:{self.height}:flags=lanczos',
-            '-movflags', '+faststart',
-            '-f', 'mp4',
-            self.output_path
-        ])
-
-        return cmd
-
-    def _check_gpu_available(self) -> bool:
-        """Check if GPU encoding is available"""
-        try:
-            result = subprocess.run(
-                ['ffmpeg', '-hide_banner', '-encoders'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            return 'h264_nvenc' in result.stdout
-        except:
-            return False
 
     async def _frame_writer(self) -> None:
         """Background task to write frames to FFmpeg"""
-        if not self.process or not self.process.stdin:
-            logger.error("FFmpeg process not initialized")
+        if not self.ffmpeg_service:
+            logger.error("FFmpeg service not initialized")
             return
 
         try:
@@ -263,9 +203,8 @@ class StreamingPipeline:
 
                 if frame:
                     try:
-                        # Write to FFmpeg stdin
-                        self.process.stdin.write(frame.data)
-                        await self.process.stdin.drain()
+                        # Write to FFmpeg via service
+                        await self.ffmpeg_service.write_frame(frame.data)
 
                         # Free memory immediately
                         del frame.data
@@ -314,25 +253,17 @@ class StreamingPipeline:
         if self.writer_task:
             await self.writer_task
 
-        # Close FFmpeg stdin
-        if self.process and self.process.stdin:
-            self.process.stdin.close()
-            await self.process.stdin.wait_closed()
+        # Use consolidated FFmpeg service for finalization
+        if self.ffmpeg_service:
+            output_path = await self.ffmpeg_service.finalize()
 
-        # Wait for FFmpeg to finish
-        if self.process:
-            stdout, stderr = await self.process.communicate()
+            # Log statistics
+            stats = self.frame_queue.get_stats()
+            logger.info(f"Pipeline stats: {stats}")
 
-            if self.process.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown error"
-                logger.error(f"FFmpeg error: {error_msg}")
-                raise RuntimeError(f"FFmpeg failed with code {self.process.returncode}")
+            logger.info(f"Streaming pipeline completed: {output_path}")
+            return output_path
 
-        # Log statistics
-        stats = self.frame_queue.get_stats()
-        logger.info(f"Pipeline stats: {stats}")
-
-        logger.info(f"Streaming pipeline completed: {self.output_path}")
         return self.output_path
 
     def get_stats(self) -> Dict[str, Any]:

@@ -11,10 +11,10 @@ import logging
 from typing import Dict, Any
 from pathlib import Path
 
-from modules.streaming_pipeline import StreamingPipeline, BackpressureManager
-from modules.memory_optimizer import get_memory_optimizer, get_gpu_manager
-from utils.browser_manager import BrowserManager
-from utils.redis_manager import RedisManager
+from app.pipeline.streaming import StreamingPipeline, BackpressureManager
+from app.pipeline.memory import get_memory_optimizer, get_gpu_manager
+from app.services.browser import BrowserManager
+from app.core.redis import RedisManager
 
 logger = logging.getLogger(__name__)
 
@@ -75,23 +75,16 @@ class GPURenderEngine:
             height = metadata.get('height', 1080)
             fps = metadata.get('fps', 30)
 
-            # Optimize memory for this segment
+            # Basic memory optimization
             optimization = await self.memory_optimizer.optimize_for_render(total_frames)
-            if not optimization['can_proceed']:
-                raise RuntimeError(f"Insufficient memory for {total_frames} frames")
 
-            # Apply optimizations
-            frame_buffer_size = optimization.get('frame_buffer_size', 60)
-            logger.info(f"Memory optimizations: {optimization['optimizations']}")
-
-            # Initialize streaming pipeline with optimized buffer size
+            # Initialize streaming pipeline
             streaming_pipeline = StreamingPipeline(
                 output_path=str(output_path),
                 width=width,
                 height=height,
                 fps=fps
             )
-            streaming_pipeline.frame_queue.max_size = frame_buffer_size
 
             # Check GPU availability
             import torch
@@ -165,20 +158,16 @@ class GPURenderEngine:
                             job_id, worker_id, 'processing', progress
                         )
 
-                        # Log pipeline stats
+                        # Log progress
                         stats = streaming_pipeline.get_stats()
-                        memory_stats = self.memory_optimizer.get_optimization_stats()
                         logger.info(
                             f"Worker {worker_id}: {frames_processed}/{total_frames} frames ({progress:.1f}%), "
-                            f"Queue: {stats['queue_stats']['queue_size']}/{stats['queue_stats']['max_size']}, "
-                            f"Dropped: {frames_dropped}, Memory: {memory_stats['current_memory_mb']:.1f}MB"
+                            f"Queue: {stats['queue_stats']['queue_size']}, Dropped: {frames_dropped}"
                         )
 
-                    # Adaptive garbage collection based on memory pressure
-                    if frames_processed % 100 == 0:
+                    # Periodic garbage collection
+                    if frames_processed % 150 == 0:
                         await self.memory_optimizer.garbage_collect(level=1)
-                    elif frames_processed % 300 == 0:
-                        await self.memory_optimizer.garbage_collect(level=2)
 
             finally:
                 # Clean up browser
@@ -190,9 +179,6 @@ class GPURenderEngine:
 
             # Get final statistics
             pipeline_stats = streaming_pipeline.get_stats()
-            memory_stats = self.memory_optimizer.get_optimization_stats()
-
-            # Get file size
             file_size = output_path.stat().st_size if output_path.exists() else 0
 
             # Update completion status
@@ -208,9 +194,7 @@ class GPURenderEngine:
                 'start_frame': start_frame,
                 'end_frame': end_frame,
                 'duration': end_time - start_time,
-                'drop_rate': pipeline_stats['queue_stats']['drop_rate'],
-                'memory_peak_mb': memory_stats['current_memory_mb'],
-                'memory_trend': memory_stats['memory_trend']
+                'drop_rate': pipeline_stats['queue_stats']['drop_rate']
             }
 
             logger.info(
@@ -242,8 +226,8 @@ class GPURenderEngine:
             # Stop memory optimizer
             await self.memory_optimizer.stop()
 
-            # Final aggressive garbage collection
-            await self.memory_optimizer.garbage_collect(level=2)
+            # Final garbage collection
+            await self.memory_optimizer.garbage_collect(level=1)
             gc.collect()
 
     async def merge_segments(self, job_id: str, segment_results: list) -> Dict[str, Any]:
@@ -280,7 +264,7 @@ class GPURenderEngine:
             output_path = self.temp_dir / f"final_{job_id}.mp4"
 
             # Use SegmentMerger for intelligent merging
-            from modules.segment_merger import SegmentMerger, SegmentInfo
+            from app.pipeline.merger import SegmentMerger, SegmentInfo
             merger = SegmentMerger(job_id, output_dir=self.temp_dir)
             merger.expected_segments = len(sorted_results)
 
@@ -310,7 +294,7 @@ class GPURenderEngine:
                 if failed_segments:
                     logger.warning(f"Found {len(failed_segments)} failed segments")
                     # Attempt error recovery if possible
-                    from modules.segment_merger import ErrorRecovery
+                    from app.pipeline.merger import ErrorRecovery
                     recovery = ErrorRecovery(max_retries=2)
                     if recovery.can_recover():
                         logger.info("Attempting partial merge with available segments")
@@ -410,7 +394,7 @@ class GPURenderEngine:
             S3 URL
         """
         try:
-            from src.s3 import S3Service
+            from app.services.s3 import S3Service
             s3_service = S3Service(self.s3_bucket)
 
             s3_key = f"rendered/{job_id}/output.mp4"

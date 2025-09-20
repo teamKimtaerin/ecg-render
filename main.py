@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-ECG GPU Render Server - Unified Entry Point
-Supports both Standalone FastAPI server and Celery Worker modes
+ECG GPU Render Server - Celery Worker
+Simplified entry point for GPU rendering tasks
 """
 
 import os
 import sys
 import argparse
 import logging
+import subprocess
 from typing import Optional
 
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# Import settings after loading env vars
+from app.core.config import settings
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,68 +35,19 @@ def setup_logging(log_level: str = "INFO") -> None:
     )
 
 
-def get_runtime_mode() -> str:
-    """Determine runtime mode from environment variables and arguments"""
-    # Check environment variable first
-    env_mode = os.getenv("ECG_RENDER_MODE", "").lower()
-    if env_mode in ["standalone", "worker", "celery"]:
-        return "worker" if env_mode in ["worker", "celery"] else "standalone"
-
-    # Default to standalone
-    return "standalone"
-
-
-def run_standalone_server(host: str = "0.0.0.0", port: int = 8090, workers: int = 1, log_level: str = "info"):
-    """Run FastAPI server in standalone mode"""
-    import uvicorn
-    from render_server import app
-
-    logger = logging.getLogger(__name__)
-
-    # Configuration summary
-    logger.info("🖥️  ECG GPU Render Server - Standalone Mode")
-    logger.info(f"   📍 Address: {host}:{port}")
-    logger.info(f"   👥 Uvicorn Workers: {workers}")
-    logger.info(f"   🔧 Render Workers: {os.getenv('MAX_CONCURRENT_JOBS', '3')}")
-    logger.info(f"   🎮 GPU Mode: {'Enabled' if check_gpu_available() else 'CPU Fallback'}")
-    logger.info(f"   📦 Redis: {os.getenv('REDIS_URL', 'redis://localhost:6379')}")
-    logger.info(f"   ☁️  S3 Bucket: {os.getenv('S3_BUCKET', 'ecg-rendered-videos')}")
-    logger.info(f"   🔄 Callback URL: {os.getenv('BACKEND_CALLBACK_URL', 'Not configured')}")
-
-    # Parallel rendering info
-    parallel_mode = os.getenv("USE_PARALLEL_RENDERING", "true").lower() == "true"
-    browser_pool = os.getenv("BROWSER_POOL_SIZE", "4")
-    logger.info(f"   🚀 Parallel Rendering: {'Enabled' if parallel_mode else 'Disabled'}")
-    if parallel_mode:
-        logger.info(f"   🌐 Browser Pool Size: {browser_pool} per worker")
-
-    logger.info("Starting server...")
-
-    # Run FastAPI server
-    uvicorn.run(
-        "render_server:app",
-        host=host,
-        port=port,
-        workers=workers,
-        access_log=True,
-        log_level=log_level,
-        reload=False
-    )
-
-
 def run_celery_worker(log_level: str = "info", concurrency: int = 1):
-    """Run Celery worker mode"""
+    """Run Celery worker for GPU rendering"""
     import subprocess
 
     logger = logging.getLogger(__name__)
 
     # Configuration summary
-    logger.info("🔧 ECG GPU Render Server - Celery Worker Mode")
+    logger.info("🔧 ECG GPU Render Server - Celery Worker")
     logger.info(f"   🎮 GPU Mode: {'Enabled' if check_gpu_available() else 'CPU Fallback'}")
     logger.info(f"   👥 Concurrency: {concurrency}")
-    logger.info(f"   📦 Broker: {os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')}")
-    logger.info(f"   💾 Backend: {os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/1')}")
-    logger.info(f"   ☁️  S3 Bucket: {os.getenv('S3_BUCKET', 'ecg-rendered-videos')}")
+    logger.info(f"   📦 Broker: {settings.CELERY_BROKER_URL}")
+    logger.info(f"   💾 Backend: {settings.CELERY_RESULT_BACKEND}")
+    logger.info(f"   ☁️  S3 Bucket: {settings.S3_BUCKET}")
 
     # Phase 2 optimizations info
     logger.info("   🚀 Phase 2 Optimizations: Enabled")
@@ -106,7 +61,7 @@ def run_celery_worker(log_level: str = "info", concurrency: int = 1):
     try:
         celery_cmd = [
             sys.executable,
-            "celery_worker.py"
+            "app/workers/celery.py"
         ]
 
         # Run celery worker
@@ -174,20 +129,14 @@ def show_system_info():
 
     # Environment Configuration
     logger.info("\n📝 Configuration:")
-    config_vars = [
-        ("REDIS_URL", "redis://localhost:6379"),
-        ("S3_BUCKET", "ecg-rendered-videos"),
-        ("MAX_CONCURRENT_JOBS", "3"),
-        ("USE_PARALLEL_RENDERING", "true"),
-        ("BROWSER_POOL_SIZE", "4"),
-        ("BACKEND_CALLBACK_URL", "Not configured"),
-        ("CELERY_BROKER_URL", "redis://localhost:6379/0"),
-        ("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
-    ]
-
-    for var, default in config_vars:
-        value = os.getenv(var, default)
-        logger.info(f"   {var}: {value}")
+    # Display current settings
+    logger.info(f"   REDIS_URL: {settings.REDIS_URL}")
+    logger.info(f"   S3_BUCKET: {settings.S3_BUCKET}")
+    logger.info(f"   MAX_CONCURRENT_JOBS: {settings.MAX_CONCURRENT_JOBS}")
+    logger.info(f"   ENABLE_STREAMING_PIPELINE: {settings.ENABLE_STREAMING_PIPELINE}")
+    logger.info(f"   BACKEND_CALLBACK_URL: {settings.BACKEND_CALLBACK_URL}")
+    logger.info(f"   CELERY_BROKER_URL: {settings.CELERY_BROKER_URL}")
+    logger.info(f"   CELERY_RESULT_BACKEND: {settings.CELERY_RESULT_BACKEND}")
 
     logger.info("=" * 50)
 
@@ -195,22 +144,11 @@ def show_system_info():
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="ECG GPU Render Server - Unified Entry Point"
+        description="ECG GPU Render Server - Celery Worker"
     )
 
-    # Mode selection
-    parser.add_argument(
-        "--mode",
-        choices=["standalone", "worker", "auto"],
-        default="auto",
-        help="Runtime mode: standalone (FastAPI server), worker (Celery), auto (from environment)"
-    )
-
-    # Server configuration
-    parser.add_argument("--host", default="0.0.0.0", help="Bind host (standalone mode)")
-    parser.add_argument("--port", type=int, default=8090, help="Bind port (standalone mode)")
-    parser.add_argument("--workers", type=int, default=1, help="Uvicorn workers (standalone mode)")
-    parser.add_argument("--concurrency", type=int, default=1, help="Celery concurrency (worker mode)")
+    # Worker configuration
+    parser.add_argument("--concurrency", type=int, default=1, help="Celery concurrency")
 
     # General options
     parser.add_argument(
@@ -235,35 +173,18 @@ def main():
         show_system_info()
         return
 
-    # Determine runtime mode
-    if args.mode == "auto":
-        mode = get_runtime_mode()
-    else:
-        mode = args.mode
-
-    # Run in selected mode
+    # Run Celery worker
     try:
-        if mode == "standalone":
-            run_standalone_server(
-                host=args.host,
-                port=args.port,
-                workers=args.workers,
-                log_level=args.log_level
-            )
-        elif mode == "worker":
-            run_celery_worker(
-                log_level=args.log_level,
-                concurrency=args.concurrency
-            )
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-
+        run_celery_worker(
+            log_level=args.log_level,
+            concurrency=args.concurrency
+        )
     except KeyboardInterrupt:
         logger = logging.getLogger(__name__)
-        logger.info("Server stopped by user")
+        logger.info("Worker stopped by user")
     except Exception as e:
         logger = logging.getLogger(__name__)
-        logger.error(f"Server failed to start: {e}")
+        logger.error(f"Worker failed to start: {e}")
         sys.exit(1)
 
 

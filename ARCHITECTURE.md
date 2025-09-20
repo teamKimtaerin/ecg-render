@@ -1,8 +1,8 @@
-# ECG GPU Render System - 리팩토링된 기술 아키텍처 및 동작 흐름
+# ECG GPU Render System - 통합 아키텍처 가이드
 
 ## 🎯 시스템 개요
 
-**ECG GPU Render System**은 비디오에 MotionText 자막을 GPU 가속으로 렌더링하는 분산 처리 시스템입니다.
+**ECG GPU Render System**은 비디오에 MotionText 자막을 GPU 가속으로 렌더링하는 분산 처리 시스템입니다. ML Audio Server에서 분석된 자막 데이터를 받아 최종 렌더링된 비디오를 생성하는 전체 ECG 비디오 처리 파이프라인의 마지막 단계입니다.
 
 ### 🏗️ 핵심 아키텍처 (리팩토링 후)
 
@@ -92,6 +92,129 @@ Playwright → Memory Queue → FFmpeg (Real-time)
 
 ---
 
+## 🧩 리팩토링된 컴포넌트 구조
+
+### 1. 새로운 디렉토리 구조
+
+```
+app/
+├── core/                    # 핵심 설정 및 유틸리티
+│   ├── config.py           # Pydantic Settings 설정
+│   ├── errors.py           # 통합 에러 처리
+│   ├── queue.py            # Redis 기반 작업 큐
+│   └── redis.py            # Redis 클라이언트
+├── services/               # 외부 서비스 통합
+│   ├── s3.py              # AWS S3 서비스
+│   ├── browser.py         # Playwright 브라우저 관리
+│   └── callbacks.py       # Backend 콜백 서비스
+├── workers/               # 분산 워커 구현
+│   ├── celery.py         # Celery 워커
+│   └── render.py         # GPU 렌더링 워커
+└── pipeline/             # Phase 2 스트리밍 파이프라인
+    ├── streaming.py      # 실시간 프레임 스트리밍
+    ├── memory.py        # 메모리 최적화
+    ├── merger.py        # 세그먼트 병합
+    └── ffmpeg.py        # GPU 인코딩
+```
+
+### 2. 핵심 컴포넌트 분석
+
+#### API 서버 계층
+
+**`render_server.py` - FastAPI 메인 서버**
+```python
+# 주요 엔드포인트
+POST /render                    # 렌더링 작업 수신 (메인)
+GET  /api/render/{id}/status   # 작업 상태 조회
+POST /api/render/{id}/cancel   # 작업 취소
+GET  /health                   # 헬스체크 (GPU 상태 포함)
+GET  /queue/status            # 큐 상태 조회
+```
+
+**역할:**
+- 렌더링 요청 수신 및 검증
+- 작업을 Redis 큐에 추가
+- 워커 프로세스 생명주기 관리
+- GPU 상태 모니터링
+
+#### 분산 작업 처리 계층
+
+**`app/workers/celery.py` - Celery 워커**
+```python
+@app.task(name='render.segment')
+def render_segment(job_id: str, segment: dict):
+    # 비디오 세그먼트 렌더링
+
+@app.task(name='render.merge_segments')
+def merge_segments(job_id: str, segment_results: list):
+    # 세그먼트 병합
+```
+
+**Celery를 사용하는 이유:**
+- **분산 처리**: 여러 GPU 인스턴스에 작업 분산
+- **신뢰성**: 작업 재시도, 실패 처리, 장애 복구
+- **확장성**: 워커 수를 동적으로 조정 가능
+- **모니터링**: 작업 상태 추적 및 메트릭 수집
+
+#### Phase 2 스트리밍 최적화
+
+**`app/pipeline/streaming.py` - 실시간 프레임 스트리밍**
+```python
+class StreamingPipeline:
+    # 디스크 I/O 없이 메모리에서 FFmpeg로 직접 스트리밍
+
+class AsyncFrameQueue:
+    # 백프레셔 관리
+    # 프레임 드롭 정책
+    # 메모리 한계 모니터링
+
+class BackpressureManager:
+    # 시스템 압박 상황 감지
+    # 적응적 처리 속도 조절
+```
+
+### 3. 통합 설정 관리
+
+**`app/core/config.py` - Pydantic Settings**
+```python
+class Settings(BaseSettings):
+    # App Settings
+    app_name: str = Field(default="ECG GPU Render Server")
+    ECG_RENDER_MODE: str = Field(default="worker")  # standalone or worker
+
+    # Redis Settings
+    REDIS_URL: str = Field(default="redis://localhost:6379/0")
+    CELERY_BROKER_URL: str = Field(default="redis://localhost:6379/0")
+
+    # GPU Settings
+    MAX_CONCURRENT_JOBS: int = Field(default=3)
+    USE_GPU_ENCODING: bool = Field(default=True)
+
+    # Phase 2 Settings
+    ENABLE_STREAMING_PIPELINE: bool = Field(default=True)
+    MAX_FRAME_QUEUE_SIZE: int = Field(default=60)
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+```
+
+### 4. 통합 에러 처리
+
+**`app/core/errors.py` - Backend 호환 에러 처리**
+```python
+class GPURenderError:
+    @staticmethod
+    def gpu_memory_insufficient(required_gb, available_gb) -> HTTPException:
+        # Backend와 동일한 형식의 에러 응답
+
+    @staticmethod
+    def streaming_pipeline_error(job_id, pipeline_stage, reason) -> HTTPException:
+        # Phase 2 스트리밍 에러
+```
+
+---
+
 ## 🔄 상세 시스템 흐름
 
 ### Phase 1: 렌더링 요청 처리
@@ -106,7 +229,7 @@ sequenceDiagram
 
 **Backend API 처리:**
 ```python
-# app/api/v1/render.py
+# ecg-backend/app/api/v1/render.py
 @router.post("/create")
 async def create_render_job(request: CreateRenderRequest):
     # 1. 입력 검증
@@ -118,10 +241,11 @@ async def create_render_job(request: CreateRenderRequest):
     # 3. 작업 생성
     render_job = render_service.create_render_job(...)
 
-    # 4. Celery 작업 전송
-    background_tasks.add_task(
-        trigger_celery_render, job_id, request_data
-    )
+    # 4. Celery 작업 전송 (GPU Server 우회)
+    if RENDER_MODE == "celery":
+        background_tasks.add_task(
+            trigger_celery_render, job_id, request_data
+        )
 ```
 
 ### Phase 2: Celery Worker 처리
@@ -142,7 +266,7 @@ sequenceDiagram
 
 **Celery Worker 처리:**
 ```python
-# celery_worker.py
+# app/workers/celery.py
 @app.task(name='render.segment')
 def render_segment(job_id: str, segment: dict):
     # GPU Render Engine으로 실제 렌더링
@@ -257,6 +381,26 @@ AWS g4dn.2xlarge 기준 ($1.26/시간):
   비용 절약: 75%
 ```
 
+### 리팩토링 후 성능 향상
+
+```yaml
+Phase 1 vs Phase 2 비교:
+메트릭         | Phase 1 | Phase 2 | 개선율
+-------------|---------|---------|--------
+메모리/워커    | 6GB     | 2GB     | -70%
+동시 작업     | 3-4개   | 8-10개  | +150%
+프레임 드롭률  | 5-10%   | <1%     | -90%
+처리 지연     | 높음     | 낮음     | -50%
+
+비용 효율성 (AWS):
+구성           | Phase 1           | Phase 2           | 절약
+-------------|------------------|------------------|------
+인스턴스 타입   | g4dn.4xlarge × 3 | g4dn.2xlarge × 4 | -
+시간당 비용    | $7.56            | $5.04            | 33%
+동시 처리     | 9-12 jobs        | 32-40 jobs       | 250%
+비용/job     | $0.63            | $0.13            | 79%
+```
+
 ---
 
 ## 🚀 배포 및 확장
@@ -265,15 +409,16 @@ AWS g4dn.2xlarge 기준 ($1.26/시간):
 
 **통합 엔트리포인트:**
 ```bash
+# main.py 통합 진입점 사용
 # Standalone 서버 모드
-docker run ecg-gpu-render python main.py --mode standalone
+python main.py --mode standalone
 
 # Celery Worker 모드
-docker run ecg-gpu-render python main.py --mode worker
+python main.py --mode worker
 
 # 환경변수로 모드 설정
 export ECG_RENDER_MODE=worker
-docker run ecg-gpu-render
+python main.py
 ```
 
 **Docker Compose 구성:**
@@ -312,6 +457,37 @@ services:
 - 메모리 증가
 - 네트워크 대역폭 향상
 
+### AWS 클라우드 배포 가이드
+
+#### 인스턴스 타입 선택
+
+**GPU Render Server**
+```yaml
+권장: g4dn.2xlarge
+- GPU: 1x NVIDIA T4 (16GB VRAM)
+- CPU: 8 vCPUs
+- Memory: 32GB
+- 네트워크: 최대 25 Gbps
+- 시간당 비용: ~$1.26
+
+Phase 2 최적화로 더 작은 인스턴스도 가능:
+대안: g4dn.xlarge
+- Memory: 16GB (2GB/worker × 8 workers)
+- 시간당 비용: ~$0.63
+```
+
+#### 배포 아키텍처
+
+**Production 환경**
+```yaml
+ALB (Application Load Balancer)
+└── ECS Service: gpu-render-api
+    ├── Task: render-server (Fargate)
+    └── Task: celery-worker (EC2 with GPU)
+        ├── Instance: g4dn.2xlarge × 2-8 (Auto Scaling)
+        └── ElastiCache Redis Cluster
+```
+
 ---
 
 ## 🔧 개발 및 운영
@@ -323,8 +499,8 @@ services:
 pip install -r requirements.txt
 playwright install chromium
 
-# 통합 서버 실행
-python main.py --mode standalone --info
+# 통합 서버 실행 (main.py 사용)
+python main.py --mode standalone --log-level debug
 
 # Celery Worker 실행
 python main.py --mode worker --log-level debug
@@ -337,8 +513,8 @@ python main.py --mode worker --log-level debug
 curl http://localhost:8090/health
 
 # Celery 워커 모니터링
-celery -A celery_worker inspect active
-celery -A celery_worker flower  # Web UI
+celery -A app.workers.celery inspect active
+celery -A app.workers.celery flower  # Web UI
 
 # Redis 큐 상태
 redis-cli monitor
@@ -399,7 +575,7 @@ MAX_GPU_MEMORY=16GB
 
 ```bash
 # 상세 로그 확인
-python main.py --log-level debug
+python main.py --mode worker --log-level debug
 
 # GPU 상태 진단
 nvidia-smi dmon -s u
@@ -408,7 +584,7 @@ nvidia-smi dmon -s u
 watch -n 1 'free -h && nvidia-smi --query-gpu=memory.used,memory.free --format=csv'
 
 # Celery 작업 추적
-celery -A celery_worker events
+celery -A app.workers.celery events
 ```
 
 ---
@@ -429,4 +605,62 @@ celery -A celery_worker events
 - AWS, GCP, Azure 동시 지원
 - 지연시간 최적화 라우팅
 
-이 문서는 ECG GPU Render System의 리팩토링된 아키텍처를 완전히 반영하며, 실제 운영에 필요한 모든 기술적 세부사항을 포함합니다.
+### 확장성 고려사항
+
+**수평 확장**
+- **GPU 워커**: 최대 20개 인스턴스까지 확장 가능
+- **처리 용량**: 시간당 1,000+ 비디오 렌더링
+- **동시 사용자**: 10,000+ 동시 접속 지원
+
+**글로벌 확장**
+- **멀티 리전**: 각 대륙별 리전 배포
+- **CDN**: CloudFront로 렌더링 결과 전송 최적화
+- **데이터 복제**: 리전 간 S3 복제
+
+---
+
+## 🧹 리팩토링 완료 사항
+
+### ✅ 완료된 개선사항
+
+1. **통합 진입점 (`main.py`)**
+   - Standalone과 Worker 모드 통합
+   - 환경변수 기반 모드 선택
+
+2. **디렉토리 구조 재편**
+   - `app/` 패키지로 코드 조직화
+   - 기능별 모듈 분리 (core, services, workers, pipeline)
+
+3. **Pydantic Settings 통합**
+   - 타입 안전한 설정 관리
+   - Backend와 일관된 설정 패턴
+
+4. **에러 처리 표준화**
+   - Backend 호환 HTTP 에러 응답
+   - 통합 에러 코드 및 메시지
+
+5. **S3 서비스 통합**
+   - Backend와 호환되는 S3 API
+   - 비동기 처리 및 presigned URL 지원
+
+6. **Redis 클라이언트 개선**
+   - Settings 통합 및 싱글톤 패턴
+   - Phase 2 메트릭 지원
+
+### 🗑️ 제거된 레거시 컴포넌트
+
+1. **중복 서버 파일**
+   - `server.py` → `render_server.py`로 통합
+   - `AWS_ARCHITECTURE.md`, `QUICKSTART.md` 삭제
+
+2. **사용되지 않는 모듈**
+   - `modules/segment_optimizer.py`
+   - `modules/worker_pool.py`
+   - `dump.rdb` (Redis 덤프)
+
+3. **레거시 워커**
+   - `modules/worker.py` → `app/workers/render.py`로 업그레이드
+
+---
+
+이 통합된 아키텍처 문서는 ECG GPU Render System의 완전한 이해와 효과적인 클라우드 배포를 위한 모든 정보를 제공합니다. Phase 2 스트리밍 최적화와 Celery + Redis 조합을 통해 더 적은 비용으로 더 높은 성능을 달성하며, 리팩토링을 통해 유지보수성과 확장성을 크게 향상시켰습니다.

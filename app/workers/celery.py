@@ -14,7 +14,8 @@ import asyncio
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Import render engine
+# Import settings and render engine
+from app.core.config import settings
 from render_engine import GPURenderEngine
 
 # Configure logging
@@ -24,9 +25,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Celery configuration
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/1')
+# Celery configuration from settings
+CELERY_BROKER_URL = settings.CELERY_BROKER_URL
+CELERY_RESULT_BACKEND = settings.CELERY_RESULT_BACKEND
 
 # Create Celery app
 app = Celery(
